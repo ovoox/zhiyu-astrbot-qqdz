@@ -1,0 +1,108 @@
+import random
+from datetime import datetime
+from aiocqhttp import CQHttp
+import aiocqhttp
+from astrbot.api.event import filter
+from astrbot.api.star import Context, Star, register
+from astrbot.core.config.astrbot_config import AstrBotConfig
+import astrbot.api.message_components as Comp
+from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+    AiocqhttpMessageEvent,
+)
+from astrbot.core.star.filter.permission import PermissionType
+
+@register(
+    "astrbot_plugin_zanwo",
+    "Futureppo",
+    "订阅点赞功能",
+    "1.0.8",
+    "https://github.com/Futureppo/astrbot_plugin_zanwo",
+)
+class zanwo(Star):
+    def __init__(self, context: Context, config: AstrBotConfig):
+        super().__init__(context)
+        self.config = config
+        # 订阅点赞的用户ID列表
+        self.subscribed_users: list[str] = config.get("subscribed_users", [])
+        # 点赞日期
+        self.zanwo_date: str = config.get("zanwo_date", None)
+
+    async def _like(self, client: CQHttp, ids: list[str]) -> str:
+        """
+        点赞的核心逻辑
+        :param client: CQHttp客户端
+        :param ids: 用户ID列表
+        """
+        replys = []
+        for id in ids:
+            total_likes = 0
+            username = (await client.get_stranger_info(user_id=int(id))).get(
+                "nickname", "未知用户"
+            )
+            for _ in range(5):
+                try:
+                    await client.send_like(user_id=int(id), times=10)  # 点赞10次
+                    total_likes += 10
+                except aiocqhttp.exceptions.ActionFailed as e:
+                    error_message = str(e)
+                    if "已达" in error_message:
+                        error_reply = "今天给{username}的赞已达上限"
+                    elif "权限" in error_message:
+                        error_reply = "你设了权限不许陌生人赞你"
+                    else:
+                        error_reply = "不加好友不赞"
+                    break
+
+            reply = f"给{username}点了{total_likes}个赞" if total_likes > 0 else error_reply
+            replys.append(reply)
+
+        return "\n".join(replys).strip()
+
+    @filter.command("订阅点赞")
+    async def subscribe_like(self, event: AiocqhttpMessageEvent):
+        """订阅点赞"""
+        sender_id = event.get_sender_id()
+        if sender_id in self.subscribed_users:
+            yield event.plain_result("你已经订阅点赞了哦~")
+            return
+        self.subscribed_users.append(sender_id)
+        self.config.save_config()
+        yield event.plain_result("订阅成功！我将每天自动为你点赞")
+
+    @filter.command("取消订阅点赞")
+    async def unsubscribe_like(self, event: AiocqhttpMessageEvent):
+        """取消订阅点赞"""
+        sender_id = event.get_sender_id()
+        if sender_id not in self.subscribed_users:
+            yield event.plain_result("你还没有订阅点赞哦~")
+            return
+        self.subscribed_users.remove(sender_id)
+        self.config.save_config()
+        yield event.plain_result("已取消订阅！我将不再自动给你点赞")
+
+    @filter.command("订阅点赞列表")
+    async def like_list(self, event: AiocqhttpMessageEvent):
+        """查看订阅点赞的用户ID列表"""
+        if not self.subscribed_users:
+            yield event.plain_result("当前没有订阅点赞的用户哦~")
+            return
+        users_str = "\n".join(self.subscribed_users).strip()
+        yield event.plain_result(f"当前订阅点赞的用户ID列表：\n{users_str}")
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("自动点赞")
+    async def auto_like(self, event: AiocqhttpMessageEvent):
+        """手动触发自动点赞"""
+        if not self.subscribed_users:
+            yield event.plain_result("当前没有订阅点赞的用户哦~")
+            return
+        
+        # 检查是否需要点赞（日期不同）
+        if self.zanwo_date != datetime.now().date().strftime("%Y-%m-%d"):
+            client = event.bot
+            result = await self._like(client, self.subscribed_users)
+            self.zanwo_date = datetime.now().date().strftime("%Y-%m-%d")
+            self.config.save_config()
+            yield event.plain_result(f"自动点赞完成：\n{result}")
+        else:
+            yield event.plain_result("今天已经点过赞了哦~")
